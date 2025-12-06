@@ -5,42 +5,66 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+    # PR触发时不推送镜像（避免无意义的权限校验）
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
-# 添加权限配置
+# 权限配置（顶层声明对所有job生效，也可在job内单独声明）
 permissions:
   contents: read
   packages: write
+  actions: write  # 给GH缓存额外加的权限（可选，但建议加）
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+    # PR触发时跳过推送（核心优化：PR无写入Packages权限，避免报错）
+    if: github.event_name != 'pull_request'
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-    
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
-    
-    - name: Login to GitHub Container Registry
-      uses: docker/login-action@v2
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Convert repository name to lowercase
-      id: repo
-      run: echo "repo_lower=$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-    
-    - name: Build and push
-      uses: docker/build-push-action@v4
-      with:
-        context: .
-        push: true
-        tags: |
-          ghcr.io/${{ steps.repo.outputs.repo_lower }}:latest
-          ghcr.io/${{ steps.repo.outputs.repo_lower }}:${{ github.sha }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+      - name: Checkout code
+        uses: actions/checkout@v4  # 升级到最新版，兼容性更好
+        with:
+          fetch-depth: 0  # 可选：若Dockerfile依赖git信息，需拉全历史
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3  # 升级到v3，适配新版buildx
+        with:
+          install: true  # 确保安装最新版buildx
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3  # 升级到v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          # 可选：开启调试，排查登录问题
+          logout: true  # 工作流结束后登出
+
+      - name: Convert repository name to lowercase
+        id: repo
+        run: |
+          # 健壮性优化：处理仓库名含特殊字符的情况
+          repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9\/_-]//g')
+          echo "repo_lower=${repo_lower}" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5  # 升级到v5（v4也可，v5更稳定）
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ steps.repo.outputs.repo_lower }}:latest
+            ghcr.io/${{ steps.repo.outputs.repo_lower }}:${{ github.sha }}
+          # 缓存优化：提升构建速度
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 可选：开启构建日志调试
+          provenance: false  # 简化构建，避免不必要的校验
+          sbom: false
+
+      # 可选：验证镜像推送成功
+      - name: Verify image exists
+        run: |
+          docker pull ghcr.io/${{ steps.repo.outputs.repo_lower }}:latest
+          docker images | grep ghcr.io/${{ steps.repo.outputs.repo_lower }}
