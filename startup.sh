@@ -41,7 +41,7 @@ EOFCONF
 echo ">>> 启动 Cloudreve 主程序..."
 
 # =======================================================
-# 关键修复：将 --conf 改为 -c
+# 关键修复：这里必须用 -c，不能用 --conf
 # =======================================================
 ./cloudreve -c /app/conf.ini &
 CLOUDREVE_PID=$!
@@ -50,11 +50,13 @@ echo "Cloudreve PID: $CLOUDREVE_PID"
 # 等待 Cloudreve 启动
 echo ">>> 等待服务就绪..."
 for i in {1..10}; do
+    # 检查进程是否意外退出
     if ! kill -0 $CLOUDREVE_PID 2>/dev/null; then
         echo "❌ 致命错误: Cloudreve 启动失败! 进程已退出。"
         exit 1
     fi
 
+    # 检查端口是否通
     if curl -sf http://localhost:7860/ > /dev/null 2>&1; then
         echo "✅ Cloudreve 启动成功"
         break
