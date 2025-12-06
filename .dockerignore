@@ -1,0 +1,17 @@
+.git
+.github
+.gitignore
+README.md
+*.md
+.env
+.env.example
+*.log
+node_modules
+__pycache__
+*.pyc
+.pytest_cache
+.vscode
+.idea
+*.swp
+*.swo
+*~
