@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-超大文件同步引擎 (修复版 v3)
-1. 强制同步空文件夹 (通过 .gitkeep)
-2. 自动识别 Dataset 仓库 ID
+超大文件同步引擎 (稳定性优化版)
+1. 增加上传间隔 (防止 I/O 占满导致 Cloudreve 无响应)
+2. 强制同步空文件夹
 """
 import os
 import time
@@ -21,12 +21,10 @@ class HugeFileSync:
         self.hf_token = os.getenv('HF_TOKEN')
         self.dataset_repo = os.getenv('HF_DATASET_REPO', 'large-storage')
         self.local_path = "/app/uploads"
-        
-        # 记录已同步的路径，防止重复上传
         self.synced_files = set()
         
         if not self.hf_token:
-            logger.error("❌ 未设置 HF_TOKEN，同步停止")
+            logger.error("❌ 未设置 HF_TOKEN")
             return
             
         self.api = HfApi(token=self.hf_token)
@@ -46,13 +44,12 @@ class HugeFileSync:
             create_repo(
                 self.full_repo, repo_type="dataset", private=True, exist_ok=True, token=self.hf_token
             )
-            logger.info(f"✅ 仓库连接成功: {self.full_repo}")
+            logger.info(f"✅ 仓库连接: {self.full_repo}")
         except Exception as e:
-            logger.error(f"❌ 仓库初始化失败: {e}")
+            logger.error(f"❌ 仓库连接失败: {e}")
             self.full_repo = None
 
     def is_file_stable(self, file_path):
-        """文件稳定性检测"""
         if file_path.endswith('.gitkeep'): return True
         try:
             size1 = os.path.getsize(file_path)
@@ -65,7 +62,6 @@ class HugeFileSync:
             return False
 
     def upload_file(self, file_path, rel_path):
-        """统一上传函数"""
         try:
             logger.info(f"⬆️ 上传中: {rel_path}")
             self.api.upload_file(
@@ -75,8 +71,11 @@ class HugeFileSync:
                 repo_type="dataset",
                 token=self.hf_token
             )
-            # 记录已同步
             self.synced_files.add(rel_path)
+            
+            # === 关键优化：上传完一个文件后休息 1 秒 ===
+            # 让出 I/O 资源给 Cloudreve 主程序，防止前端请求超时
+            time.sleep(1) 
             return True
         except Exception as e:
             logger.error(f"❌ 上传失败 {rel_path}: {e}")
@@ -84,7 +83,7 @@ class HugeFileSync:
 
     def upload_worker(self):
         if not self.hf_token: return
-        logger.info(f"🚀 开始监控目录: {self.local_path}")
+        logger.info(f"🚀 同步服务启动: {self.local_path}")
         
         while True:
             processed = False
@@ -93,57 +92,45 @@ class HugeFileSync:
                 self._init_repo()
                 continue
 
-            # 遍历本地目录
             for root, dirs, files in os.walk(self.local_path):
-                
-                # --- 1. 处理文件夹 (创建 .gitkeep) ---
+                # 处理文件夹
                 for d in dirs:
                     dir_path = os.path.join(root, d)
                     gitkeep_path = os.path.join(dir_path, ".gitkeep")
-                    
-                    # 如果 .gitkeep 不存在，创建它
                     if not os.path.exists(gitkeep_path):
                         try:
                             with open(gitkeep_path, 'w') as f: pass
-                            # 手动把这个新文件加入当前循环的 file 列表里不容易，
-                            # 所以我们直接在这里触发上传逻辑
                             rel_path = os.path.relpath(gitkeep_path, self.local_path)
                             if rel_path not in self.synced_files:
-                                logger.info(f"📁 发现新文件夹，同步结构: {os.path.dirname(rel_path)}")
                                 self.upload_file(gitkeep_path, rel_path)
-                        except Exception as e:
-                            logger.error(f"无法创建占位文件: {e}")
+                        except: pass
 
-                # --- 2. 处理文件 ---
+                # 处理文件
                 for file in files:
                     file_path = os.path.join(root, file)
                     rel_path = os.path.relpath(file_path, self.local_path)
                     
-                    # 过滤
                     if any(file.endswith(e) for e in self.ignore_exts): continue
                     if file.startswith('.') and file != '.gitkeep': continue
 
-                    # 检查是否已同步过 (.gitkeep 特殊处理，不删除)
+                    # .gitkeep 特殊处理
                     if file == '.gitkeep':
                         if rel_path not in self.synced_files:
                             self.upload_file(file_path, rel_path)
                         continue
                     
-                    # 普通文件稳定性检测
                     if not self.is_file_stable(file_path): continue
                     
                     gb_size = os.path.getsize(file_path) / (1024**3)
-                    logger.info(f"📦 发现新文件: {rel_path} ({gb_size:.2f} GB)")
+                    logger.info(f"📦 新文件: {rel_path} ({gb_size:.2f} GB)")
                     
-                    # 上传并删除
                     if self.upload_file(file_path, rel_path):
-                        logger.info(f"✅ 上传成功: {rel_path}")
+                        logger.info(f"✅ 完成: {rel_path}")
                         try:
                             os.remove(file_path)
-                            logger.info(f"🗑️ 本地释放: {rel_path}")
+                            logger.info(f"🗑️ 已清理")
                             processed = True
-                        except:
-                            pass
+                        except: pass
             
             if not processed:
                 time.sleep(5)
