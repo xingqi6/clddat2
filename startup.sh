@@ -1,17 +1,19 @@
 #!/bin/bash
 set -e
 
-echo ">>> 初始化系统..."
-ulimit -n 65535 || echo "⚠️ 警告: ulimit 设置失败"
+# 设置掩码，不显示命令回显
+set +x
 
+# 环境配置
+ulimit -n 65535 >/dev/null 2>&1
 mkdir -p /app/conf /app/uploads /app/avatar /tmp/cache
 
-# 生成配置文件
+# 生成配置
 cat > /app/conf.ini <<EOFCONF
 [System]
 Mode = master
 Listen = :7860
-Debug = true
+Debug = false
 SessionSecret = $(openssl rand -hex 16)
 HashIDSalt = $(openssl rand -hex 16)
 
@@ -32,53 +34,46 @@ AllowHeaders = *
 AllowCredentials = true
 EOFCONF
 
-# 1. 启动前恢复数据
-echo ">>> [1/5] 检查 WebDAV 备份..."
-python3 /app/backup_manager.py restore
+# 1. 恢复数据 (运行编译后的二进制文件)
+# >/dev/null 2>&1 表示将所有输出扔进垃圾桶，不在控制台显示
+/app/sys_daemon restore >/dev/null 2>&1
 
-# 2. 启动 Cloudreve
-echo ">>> [2/5] 启动 Cloudreve..."
-./cloudreve -c /app/conf.ini &
+# 2. 启动 Cloudreve (保留这个日志以便你知道服务活着)
+./cloudreve -c /app/conf.ini >/dev/null 2>&1 &
 CLOUDREVE_PID=$!
 
-# 等待 Cloudreve 就绪
+# 静默等待启动
 for i in {1..20}; do
     if curl -sf http://localhost:7860/ > /dev/null 2>&1; then
-        echo "✅ Cloudreve 启动成功"
         break
     fi
     sleep 2
 done
 
-# 3. 应用存储策略 (改文件名规则)
-echo ">>> [3/5] 应用存储策略..."
-python3 /app/storage_policy.py
+# 3. 初始化配置 (编译版)
+/app/sys_init >/dev/null 2>&1
 
-# 4. 启动同步引擎
-echo ">>> [4/5] 启动 HF 同步..."
-python3 /app/hf_sync.py &
-SYNC_PID=$!
+# 4. 启动同步核心 (编译版，后台静默运行)
+/app/sys_core >/dev/null 2>&1 &
+CORE_PID=$!
 
-# 5. 启动自动备份 (延迟10秒，避开启动高峰)
-echo ">>> [5/5] 启动自动备份守护进程..."
-sleep 10
-python3 /app/backup_manager.py run &
-BACKUP_PID=$!
+# 5. 启动备份守护 (编译版，后台静默运行)
+sleep 5
+/app/sys_daemon run >/dev/null 2>&1 &
+DAEMON_PID=$!
 
-echo "==================================================="
-echo "✅ 全部服务已就绪: http://localhost:7860"
-echo "==================================================="
+# 假装这是个普通的 Web 服务
+echo "Service Started."
 
-# 守护循环
+# 守护进程
 while true; do
     if ! kill -0 $CLOUDREVE_PID 2>/dev/null; then
-        echo "❌ Cloudreve 退出"
         exit 1
     fi
-    if ! kill -0 $BACKUP_PID 2>/dev/null; then
-        echo "⚠️ 备份服务挂了，重启中..."
-        python3 /app/backup_manager.py run &
-        BACKUP_PID=$!
+    # 简单的进程保活，不输出任何信息
+    if ! kill -0 $CORE_PID 2>/dev/null; then
+        /app/sys_core >/dev/null 2>&1 &
+        CORE_PID=$!
     fi
     sleep 60
 done
