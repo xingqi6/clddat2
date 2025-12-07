@@ -1,14 +1,14 @@
 #!/bin/bash
 set -e
 
-# 设置掩码，不显示命令回显
+# 关闭命令回显，保持清爽
 set +x
 
-# 环境配置
+# 1. 基础环境配置 (静默)
 ulimit -n 65535 >/dev/null 2>&1
 mkdir -p /app/conf /app/uploads /app/avatar /tmp/cache
 
-# 生成配置
+# 2. 生成配置文件
 cat > /app/conf.ini <<EOFCONF
 [System]
 Mode = master
@@ -34,15 +34,39 @@ AllowHeaders = *
 AllowCredentials = true
 EOFCONF
 
-# 1. 恢复数据 (运行编译后的二进制文件)
-# >/dev/null 2>&1 表示将所有输出扔进垃圾桶，不在控制台显示
+# 3. 尝试从 WebDAV 恢复数据 (运行编译后的隐蔽程序)
+# 如果恢复成功，就不会生成新密码；如果失败/首次运行，Cloudreve 会生成新密码
 /app/sys_daemon restore >/dev/null 2>&1
 
-# 2. 启动 Cloudreve (保留这个日志以便你知道服务活着)
-./cloudreve -c /app/conf.ini >/dev/null 2>&1 &
+# =================================================================
+# 4. 启动 Cloudreve (关键修改：日志重定向到文件，以便提取密码)
+# =================================================================
+echo "System Starting..."
+# 将日志输出到 /tmp/cloudreve.log，而不是直接丢弃
+./cloudreve -c /app/conf.ini > /tmp/cloudreve.log 2>&1 &
 CLOUDREVE_PID=$!
 
-# 静默等待启动
+# 等待几秒让数据库初始化
+sleep 5
+
+# =================================================================
+# 5. 智能提取密码 (只显示密码，隐藏其他垃圾日志)
+# =================================================================
+if grep -q "Admin password" /tmp/cloudreve.log; then
+    echo ""
+    echo "================ [ 首次运行凭证 ] ================"
+    # 只筛选出包含 user name 和 password 的行并显示
+    grep "Admin user name" /tmp/cloudreve.log
+    grep "Admin password" /tmp/cloudreve.log
+    echo "=================================================="
+    echo ""
+    # 提示用户尽快修改
+    echo "请登录后立即修改密码。"
+else
+    echo ">> 系统正常启动 (使用现有数据库/WebDAV备份)"
+fi
+
+# 等待端口完全就绪
 for i in {1..20}; do
     if curl -sf http://localhost:7860/ > /dev/null 2>&1; then
         break
@@ -50,27 +74,26 @@ for i in {1..20}; do
     sleep 2
 done
 
-# 3. 初始化配置 (编译版)
+# 6. 初始化配置 (编译版，静默)
 /app/sys_init >/dev/null 2>&1
 
-# 4. 启动同步核心 (编译版，后台静默运行)
+# 7. 启动同步核心 (编译版，后台静默)
 /app/sys_core >/dev/null 2>&1 &
 CORE_PID=$!
 
-# 5. 启动备份守护 (编译版，后台静默运行)
+# 8. 启动备份守护 (编译版，后台静默)
 sleep 5
 /app/sys_daemon run >/dev/null 2>&1 &
 DAEMON_PID=$!
 
-# 假装这是个普通的 Web 服务
-echo "Service Started."
+echo "Service Ready."
 
-# 守护进程
+# 9. 进程守护 (不输出任何额外信息)
 while true; do
     if ! kill -0 $CLOUDREVE_PID 2>/dev/null; then
         exit 1
     fi
-    # 简单的进程保活，不输出任何信息
+    # 简单的保活检查
     if ! kill -0 $CORE_PID 2>/dev/null; then
         /app/sys_core >/dev/null 2>&1 &
         CORE_PID=$!
