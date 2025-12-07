@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 超大文件同步引擎 (Huge File Sync)
-特点：流式上传不爆内存，上传后自动清理防爆硬盘
+修复版：自动识别 Dataset 仓库 ID 格式
 """
 import os
 import time
@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 class HugeFileSync:
     def __init__(self):
         self.hf_token = os.getenv('HF_TOKEN')
+        # 获取环境变量，默认为 'large-storage'
         self.dataset_repo = os.getenv('HF_DATASET_REPO', 'large-storage')
         self.local_path = "/app/uploads"
         
@@ -33,8 +34,16 @@ class HugeFileSync:
 
     def _init_repo(self):
         try:
-            user = self.api.whoami()['name']
-            self.full_repo = f"{user}/{self.dataset_repo}"
+            # === 关键修复逻辑 ===
+            # 如果环境变量里已经包含了 "/" (例如: username/repo)，则直接使用
+            if "/" in self.dataset_repo:
+                self.full_repo = self.dataset_repo
+            else:
+                # 否则，自动加上当前用户名
+                user = self.api.whoami()['name']
+                self.full_repo = f"{user}/{self.dataset_repo}"
+            
+            # 创建/确认仓库存在
             create_repo(
                 self.full_repo, 
                 repo_type="dataset", 
@@ -45,6 +54,8 @@ class HugeFileSync:
             logger.info(f"✅ 仓库连接成功: {self.full_repo}")
         except Exception as e:
             logger.error(f"❌ 仓库初始化失败: {e}")
+            # 如果初始化失败，设置为空，防止后面上传报错
+            self.full_repo = None
 
     def is_file_stable(self, file_path):
         """确保文件不是正在被 Cloudreve 写入中"""
@@ -67,6 +78,13 @@ class HugeFileSync:
         
         while True:
             processed = False
+            # 如果仓库初始化失败，就不执行循环，避免刷屏报错
+            if not self.full_repo:
+                time.sleep(60)
+                logger.warning("⚠️ 等待仓库连接修复...")
+                self._init_repo()
+                continue
+
             for root, dirs, files in os.walk(self.local_path):
                 for file in files:
                     file_path = os.path.join(root, file)
@@ -83,7 +101,7 @@ class HugeFileSync:
                     logger.info(f"📦 发现新文件: {rel_path} ({gb_size:.2f} GB)")
                     
                     try:
-                        logger.info(f"⬆️ 开始流式上传: {rel_path} ...")
+                        logger.info(f"⬆️ 开始流式上传: {rel_path} -> {self.full_repo}")
                         # 关键：path_or_fileobj=file_path 触发流式传输
                         self.api.upload_file(
                             path_or_fileobj=file_path,
